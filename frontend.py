@@ -1,8 +1,27 @@
 import importlib
+import json
+from datetime import datetime, timezone
+from pathlib import Path
+
 import streamlit as st
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage
 import backend
 importlib.reload(backend)
+
+SAVE_FILE = Path('chat_resume.json')
+ARCHIVE_FILE = Path('chat_archive.json')
+
+
+def history_to_messages(history):
+    messages = []
+    for msg in history:
+        if not msg['content']:
+            continue
+        if msg['role'] == 'user':
+            messages.append(HumanMessage(content=msg['content']))
+        else:
+            messages.append(AIMessage(content=msg['content']))
+    return messages
 
 st.set_page_config(page_title='LangGraph Chatbot', page_icon='💬')
 
@@ -105,10 +124,66 @@ def render_chat_html(history):
         )
     return '<div class="chat-history">' + ''.join(safe_history) + '</div>'
 
+
+def save_json(path: Path, data):
+    path.write_text(json.dumps(data, indent=2), encoding='utf-8')
+
+
+def load_json(path: Path):
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding='utf-8'))
+        except json.JSONDecodeError:
+            return None
+    return None
+
+
+def save_current_history():
+    save_json(SAVE_FILE, st.session_state.history)
+
+
+def get_chat_title(history):
+    first_user = next(
+        (message['content'] for message in history if message['role'] == 'user' and message['content'].strip()),
+        None,
+    )
+    if first_user:
+        short = first_user.strip().replace('\n', ' ')
+        return short[:60] + ('...' if len(short) > 60 else '')
+    return 'Untitled chat'
+
+
+def archive_current_history():
+    archive = load_json(ARCHIVE_FILE) or []
+    archive.append({
+        'saved_at': datetime.now(timezone.utc).isoformat(),
+        'title': get_chat_title(st.session_state.history),
+        'history': st.session_state.history,
+    })
+    save_json(ARCHIVE_FILE, archive)
+
+
+def load_saved_history():
+    return load_json(SAVE_FILE)
+
+
+def load_latest_archive():
+    archive = load_json(ARCHIVE_FILE)
+    if archive and isinstance(archive, list):
+        return archive[-1]['history']
+    return None
+
+
 if 'history' not in st.session_state:
-    st.session_state.history = [
-        {'role': 'assistant', 'content': 'Hello, how can I assist you today?'}
-    ]
+    loaded = load_saved_history()
+    if loaded:
+        st.session_state.history = loaded
+    else:
+        st.session_state.history = [
+            {'role': 'assistant', 'content': 'Hello, how can I assist you today?'}
+        ]
+
+save_current_history()
 
 if 'checkpoint_config' not in st.session_state:
     st.session_state.checkpoint_config = {
@@ -118,11 +193,32 @@ if 'checkpoint_config' not in st.session_state:
     }
 
 with st.sidebar:
+    st.markdown('### Chat history')
+    archived = load_json(ARCHIVE_FILE) or []
+    archived_items = list(reversed(archived))
+
+    if archived_items:
+        st.caption('Open any previous conversation:')
+        for index, item in enumerate(archived_items):
+            title = item.get('title', 'Untitled chat')
+            saved_at = item.get('saved_at', '')[:16]
+            if st.button(f'{title} — {saved_at}', key=f'archive_{index}'):
+                st.session_state.history = item.get('history', []) or [
+                    {'role': 'assistant', 'content': 'Hello, how can I assist you today?'}
+                ]
+                save_current_history()
+                st.success('Loaded previous chat.')
+    else:
+        st.info('No previous chats saved yet.')
+
     st.write('')
-    if st.button('Clear conversation'):
+    if st.button('New conversation'):
+        if len(st.session_state.history) > 1:
+            archive_current_history()
         st.session_state.history = [
             {'role': 'assistant', 'content': 'Hello, how can I assist you today?'}
         ]
+        save_current_history()
 
 st.markdown('<div class="chat-panel">', unsafe_allow_html=True)
 chat_display = st.empty()
@@ -133,14 +229,15 @@ if user_input:
     st.session_state.history.append({'role': 'assistant', 'content': ''})
     chat_display.markdown(render_chat_html(st.session_state.history), unsafe_allow_html=True)
 
-    for chunk in backend.stream_chat([HumanMessage(content=user_input)], config=st.session_state.checkpoint_config):
+    history_messages = history_to_messages(st.session_state.history[:-1])
+    for chunk in backend.stream_chat(history_messages, config=st.session_state.checkpoint_config):
         st.session_state.history[-1]['content'] += chunk
         chat_display.markdown(render_chat_html(st.session_state.history), unsafe_allow_html=True)
 
     if not st.session_state.history[-1]['content'].strip():
         st.session_state.history[-1]['content'] = 'Sorry, I could not generate a response.'
         chat_display.markdown(render_chat_html(st.session_state.history), unsafe_allow_html=True)
+
+    save_current_history()
 else:
     chat_display.markdown(render_chat_html(st.session_state.history), unsafe_allow_html=True)
-
-st.markdown('</div>', unsafe_allow_html=True)

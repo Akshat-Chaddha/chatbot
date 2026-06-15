@@ -20,7 +20,7 @@ llm = HuggingFaceEndpoint(
     task = "text-generation",
 )
 
-llm = ChatHuggingFace(llm=llm)
+llm = ChatHuggingFace(llm=llm, streaming=True)
 
 def chat_node(state :chat_state):
 

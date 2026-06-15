@@ -38,3 +38,17 @@ graph.add_edge(START , 'chat_node')
 graph.add_edge('chat_node' , END)
 
 chatbot = graph.compile(checkpointer=checkpointer)
+
+def _chunk_text(chunk):
+    content = getattr(chunk, 'content', chunk)
+    if isinstance(content, list):
+        return ''.join(
+            block.get('text', '') if isinstance(block, dict) else str(block)
+            for block in content
+        )
+    return str(content)
+
+
+def stream_chat(messages: list[HumanMessage], config=None):
+    for chunk in llm.stream(messages, config=config, stream=True):
+        yield _chunk_text(chunk)

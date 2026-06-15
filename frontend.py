@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import streamlit as st
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 import backend
 importlib.reload(backend)
 
@@ -21,6 +21,56 @@ def history_to_messages(history):
             messages.append(HumanMessage(content=msg['content']))
         else:
             messages.append(AIMessage(content=msg['content']))
+    return messages
+
+
+def extract_personal_details(history):
+    details = []
+    keywords = [
+        'my name is', 'i am', "i'm", 'call me', 'you can call me',
+        'i work as', 'i work at', 'i am from', 'i live in', 'i like',
+        'i love', 'i prefer', 'my favorite', 'favorite', 'interested in',
+        'i enjoy', 'my email is', 'from ', 'based in', 'my birthday',
+        'my age', 'i study', 'i go to', 'i am a', 'i am an', 'i feel',
+    ]
+    for msg in history:
+        if msg.get('role') != 'user' or not msg.get('content'):
+            continue
+        content = msg['content'].strip()
+        low = content.lower()
+        if any(keyword in low for keyword in keywords):
+            details.append(content)
+    return details
+
+
+def build_context_message():
+    context_lines = []
+    archive = load_json(ARCHIVE_FILE) or []
+    saved = load_saved_history() or []
+
+    for history in ([saved] if saved else []) + [item.get('history', []) for item in archive]:
+        context_lines.extend(extract_personal_details(history))
+
+    if not context_lines:
+        return None
+
+    summary = (
+        'Use the following previous user details to personalize your response in this conversation. '
+        'Remember names, preferences, favorites, and personal details mentioned earlier. '
+        'Do not treat this context as part of the current chat history.'
+    )
+    for index, line in enumerate(context_lines[-20:], 1):
+        summary += f"\n{index}. {line}"
+
+    return SystemMessage(content=summary)
+
+
+def build_request_messages(history):
+    messages = []
+    context_message = build_context_message()
+    if context_message:
+        messages.append(context_message)
+    messages.extend(history_to_messages(history))
     return messages
 
 st.set_page_config(page_title='LangGraph Chatbot', page_icon='💬')
@@ -174,6 +224,13 @@ def load_latest_archive():
     return None
 
 
+def delete_archive_entry(index):
+    archive = load_json(ARCHIVE_FILE) or []
+    if 0 <= index < len(archive):
+        archive.pop(index)
+        save_json(ARCHIVE_FILE, archive)
+
+
 if 'history' not in st.session_state:
     loaded = load_saved_history()
     if loaded:
@@ -202,12 +259,19 @@ with st.sidebar:
         for index, item in enumerate(archived_items):
             title = item.get('title', 'Untitled chat')
             saved_at = item.get('saved_at', '')[:16]
-            if st.button(f'{title} — {saved_at}', key=f'archive_{index}'):
-                st.session_state.history = item.get('history', []) or [
-                    {'role': 'assistant', 'content': 'Hello, how can I assist you today?'}
-                ]
-                save_current_history()
-                st.success('Loaded previous chat.')
+            original_index = len(archived) - 1 - index
+            cols = st.columns([4, 1])
+            with cols[0]:
+                if st.button(f'{title} — {saved_at}', key=f'archive_{index}'):
+                    st.session_state.history = item.get('history', []) or [
+                        {'role': 'assistant', 'content': 'Hello, how can I assist you today?'}
+                    ]
+                    save_current_history()
+                    st.success('Loaded previous chat.')
+            with cols[1]:
+                if st.button('Delete', key=f'delete_{index}'):
+                    delete_archive_entry(original_index)
+                    st.success('Deleted archived chat.')
     else:
         st.info('No previous chats saved yet.')
 
@@ -229,7 +293,7 @@ if user_input:
     st.session_state.history.append({'role': 'assistant', 'content': ''})
     chat_display.markdown(render_chat_html(st.session_state.history), unsafe_allow_html=True)
 
-    history_messages = history_to_messages(st.session_state.history[:-1])
+    history_messages = build_request_messages(st.session_state.history[:-1])
     for chunk in backend.stream_chat(history_messages, config=st.session_state.checkpoint_config):
         st.session_state.history[-1]['content'] += chunk
         chat_display.markdown(render_chat_html(st.session_state.history), unsafe_allow_html=True)
